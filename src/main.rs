@@ -14,9 +14,11 @@ const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 const RESOLUTION: [u32; 2] = [800, 600];
-const FRICTION: f32 = 0.0;
-const MOVE_STEP: f32 = 0.4;
-const BOUNCE_FACTOR: f32 = 0.9;
+const FRICTION: f32 = 0.005;
+const BOUNCE_FACTOR: f32 = 0.5;
+const GRAVITY: f64 = 9.8;
+const BOOST_COST: f64 = 1.5;
+const BOOST_REGEN: f64 = 0.4;
 
 pub struct App {
     gl: GlGraphics, //OpenGL backend
@@ -25,6 +27,7 @@ pub struct App {
     player_vx: f32,
     player_vy: f32,
     square_size: f32,
+    boost_timer: f64,
     keys: HashSet<Key>, //currently pressed keys
 }
 
@@ -37,6 +40,7 @@ impl App {
             player_vx: 3.0,
             player_vy: 3.0,
             square_size: 50.0,
+            boost_timer: 1.0,
             keys: HashSet::new()
         }
     }
@@ -46,16 +50,26 @@ impl App {
         let square = rectangle::square(0.0, 0.0, self.square_size.into());
         let (player_x, player_y): (f64, f64) = (self.player_x.into(), self.player_y.into());
         let (tx, ty) = (player_x, player_y);
+        let jetpack_fill = -50.0 * self.boost_timer as f64;
+        let jetpack_color = if self.boost_timer >= 1.0 { GREEN } else { RED };
 
         self.gl.draw(args.viewport(), |c, gl| {
             clear([1.0; 4], gl);
             let transform = c.transform.trans(tx, ty);
             rectangle(BLUE, square, transform, gl);
+            rectangle(jetpack_color, [10.0, 60.0, 30.0, jetpack_fill], c.transform, gl);
         });
     }
 
     fn update(&mut self, args: &UpdateArgs) {
-        self.process_input();
+        self.process_input(args);
+        //replenish boost
+        if self.boost_timer < 1.0 {
+            let boost_timer_heal = args.dt*BOOST_REGEN;
+            self.boost_timer += boost_timer_heal;
+        }
+        //gravity
+        self.player_vy += (GRAVITY*args.dt) as f32;
         //needed to properly space bounces
         let (future_x, future_y) = (self.player_x+(self.player_vx as i32), self.player_y+(self.player_vy as i32));
         let (max_x, max_y) = ((RESOLUTION[0] as f32)-self.square_size, (RESOLUTION[1] as f32)-self.square_size);
@@ -63,30 +77,36 @@ impl App {
         if future_x<0 || future_x>(max_x as i32) {
             self.player_vx *= -BOUNCE_FACTOR;
         }
-        if future_y<0 || future_y>(max_y as i32) {
+        if future_y>(max_y as i32) {
             self.player_vy *= -BOUNCE_FACTOR;
         }
         //update position and velocity
         self.player_x += self.player_vx as i32;
         self.player_y += self.player_vy as i32;
-        self.player_vx -= self.player_vx * FRICTION;
-        self.player_vy -= self.player_vy * FRICTION;
-
+        //only apply friction if player is in contact with walls or floor
+        let sq_size_i32 = self.square_size as u32;
+        if self.player_x<=0 || self.player_x>=(RESOLUTION[0]-sq_size_i32) as i32 {
+                self.player_vy -= self.player_vy * FRICTION;
+        }
+        if self.player_y>=(RESOLUTION[1]-sq_size_i32) as i32 {
+                self.player_vx -= self.player_vx * FRICTION;
+        }
     }
 
-    fn process_input(&mut self) {
+    fn process_input(&mut self, args: &UpdateArgs) {
         //if a button is pressed, accelerate at a constant rate
         if self.keys.contains(&Key::Right) {
-            self.player_vx += MOVE_STEP;
+            self.player_vx += 0.1;
         }
         if self.keys.contains(&Key::Left) {
-            self.player_vx -= MOVE_STEP;
+            self.player_vx -= 0.1;
         }
         if self.keys.contains(&Key::Up) {
-            self.player_vy -= MOVE_STEP;
-        }
-        if self.keys.contains(&Key::Down) {
-            self.player_vy += MOVE_STEP;
+            let boost_timer_cost = args.dt*BOOST_COST;
+            if self.boost_timer-boost_timer_cost > 0.0 {
+                self.boost_timer -= boost_timer_cost;
+                self.player_vy -= 0.15;
+            }
         }
     }
 }
