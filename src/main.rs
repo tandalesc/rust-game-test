@@ -12,22 +12,28 @@ use std::collections::HashSet;
 
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const YELLOW: [f32; 4] = [1.0, 0.8, 0.0, 1.0];
 const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 const RESOLUTION: [u32; 2] = [800, 600];
-const FRICTION: f32 = 0.005;
-const BOUNCE_FACTOR: f32 = 0.5;
+
+const NOISE: f64 = 0.01;
+const FRICTION: f64 = 0.009;
+const BOUNCE_FACTOR: f64 = 0.5;
 const GRAVITY: f64 = 9.8;
-const BOOST_COST: f64 = 1.5;
-const BOOST_REGEN: f64 = 0.4;
+
+const SQUARE_SIZE_MAX: f64 = 70.0;
+const SQUARE_SIZE_MIN: f64 = 25.0;
+const JETPACK_COST: f64 = 1.5;
+const JETPACK_COOLDOWN: f64 = 0.5;
+const JETPACK_COOLDOWN_OVERHEAT: f64 = 0.25;
 
 pub struct App {
     gl: GlGraphics, //OpenGL backend
-    player_x: i32,
-    player_y: i32,
-    player_vx: f32,
-    player_vy: f32,
-    square_size: f32,
-    boost_timer: f64,
+    position: [f64; 2],
+    velocity: [f64; 2],
+    square_size: f64,
+    cooldown_timer: f64,
+    overheated: bool,
     keys: HashSet<Key>, //currently pressed keys
 }
 
@@ -35,77 +41,110 @@ impl App {
     fn new(gl: GlGraphics) -> Self {
         App {
             gl: gl,
-            player_x: (RESOLUTION[0]/2 - 25) as i32,
-            player_y: (RESOLUTION[1]/2 - 25) as i32,
-            player_vx: 3.0,
-            player_vy: 3.0,
+            position: [(RESOLUTION[0]/2 - 25) as f64, (RESOLUTION[1]/2 - 25) as f64],
+            velocity: [3.0, 3.0],
             square_size: 50.0,
-            boost_timer: 1.0,
+            cooldown_timer: 1.0,
+            overheated: false,
             keys: HashSet::new()
         }
     }
     fn render(&mut self, args: &RenderArgs) {
         use graphics::*;
-
-        let square = rectangle::square(0.0, 0.0, self.square_size.into());
-        let (player_x, player_y): (f64, f64) = (self.player_x.into(), self.player_y.into());
-        let (tx, ty) = (player_x, player_y);
-        let jetpack_fill = -50.0 * self.boost_timer as f64;
-        let jetpack_color = if self.boost_timer >= 1.0 { GREEN } else { RED };
+        //player render info
+        let square = rectangle::square(0.0, 0.0, self.square_size);
+        let (tx, ty) = (self.position[0], self.position[1]);
+        //jetpack render info
+        let jetpack_size = [30.0, 80.0];
+        let jetpack_fill = -jetpack_size[1] * self.cooldown_timer;
+        let jetpack_shape = [0.0, jetpack_size[1], jetpack_size[0], jetpack_fill];
+        //if overheated, color entire bar Red
+        let jetpack_color = if !self.overheated {
+            if self.cooldown_timer >= 0.5 { GREEN } else { YELLOW }
+         } else { RED };
 
         self.gl.draw(args.viewport(), |c, gl| {
             clear([1.0; 4], gl);
-            let transform = c.transform.trans(tx, ty);
-            rectangle(BLUE, square, transform, gl);
-            rectangle(jetpack_color, [10.0, 60.0, 30.0, jetpack_fill], c.transform, gl);
+            //player
+            rectangle(BLUE, square, c.transform.trans(tx, ty), gl);
+            //jetpack heat bar
+            rectangle(jetpack_color, jetpack_shape, c.transform.trans(10.0, 10.0), gl);
         });
     }
 
     fn update(&mut self, args: &UpdateArgs) {
         self.process_input(args);
-        //replenish boost
-        if self.boost_timer < 1.0 {
-            let boost_timer_heal = args.dt*BOOST_REGEN;
-            self.boost_timer += boost_timer_heal;
+        self.apply_physics(args);
+        //cooldown jetpack
+        if self.cooldown_timer < 1.0 {
+            self.cooldown_timer += if self.overheated {
+                //cooldown at a slower rate if overheated
+                args.dt*JETPACK_COOLDOWN_OVERHEAT
+            } else {
+                args.dt*JETPACK_COOLDOWN
+            };
+        } else if self.overheated { //reset flag after cooling down completely
+            self.overheated = false;
         }
-        //gravity
-        self.player_vy += (GRAVITY*args.dt) as f32;
+    }
+
+    fn apply_physics(&mut self, args: &UpdateArgs) {
+        //simple gravity
+        self.velocity[1] += GRAVITY*args.dt;
         //needed to properly space bounces
-        let (future_x, future_y) = (self.player_x+(self.player_vx as i32), self.player_y+(self.player_vy as i32));
-        let (max_x, max_y) = ((RESOLUTION[0] as f32)-self.square_size, (RESOLUTION[1] as f32)-self.square_size);
+        let (future_x, future_y) = (self.position[0]+self.velocity[0], self.position[1]+self.velocity[1]);
+        let (max_x, max_y) = ((RESOLUTION[0] as f64)-self.square_size, (RESOLUTION[1] as f64)-self.square_size);
+        let (max_x_noise, max_y_noise) = (max_x*(1.0-NOISE), max_y*(1.0-NOISE));
         //bounce if the future position is invalid
-        if future_x<0 || future_x>(max_x as i32) {
-            self.player_vx *= -BOUNCE_FACTOR;
+        if future_x<0.0 || future_x>max_x {
+            self.velocity[0] *= -BOUNCE_FACTOR;
         }
-        if future_y>(max_y as i32) {
-            self.player_vy *= -BOUNCE_FACTOR;
+        if future_y>max_y {
+            self.velocity[1] *= -BOUNCE_FACTOR;
         }
         //update position and velocity
-        self.player_x += self.player_vx as i32;
-        self.player_y += self.player_vy as i32;
+        self.position[0] += self.velocity[0];
+        self.position[1] += self.velocity[1];
         //only apply friction if player is in contact with walls or floor
-        let sq_size_i32 = self.square_size as u32;
-        if self.player_x<=0 || self.player_x>=(RESOLUTION[0]-sq_size_i32) as i32 {
-                self.player_vy -= self.player_vy * FRICTION;
+        if self.position[0]<=0.0 || self.position[0]>=max_x_noise {
+                self.velocity[1] -= self.velocity[1] * FRICTION;
         }
-        if self.player_y>=(RESOLUTION[1]-sq_size_i32) as i32 {
-                self.player_vx -= self.player_vx * FRICTION;
+        if self.position[1]>=max_y_noise {
+                self.velocity[0] -= self.velocity[0] * FRICTION;
         }
     }
 
     fn process_input(&mut self, args: &UpdateArgs) {
         //if a button is pressed, accelerate at a constant rate
         if self.keys.contains(&Key::Right) {
-            self.player_vx += 0.1;
+            self.velocity[0] += 0.1;
         }
         if self.keys.contains(&Key::Left) {
-            self.player_vx -= 0.1;
+            self.velocity[0] -= 0.1;
         }
         if self.keys.contains(&Key::Up) {
-            let boost_timer_cost = args.dt*BOOST_COST;
-            if self.boost_timer-boost_timer_cost > 0.0 {
-                self.boost_timer -= boost_timer_cost;
-                self.player_vy -= 0.15;
+            //use boost to go Up, while cooldown_timer is not empty
+            let cooldown_timer_cost = args.dt*JETPACK_COST;
+            //simulates weight, based on square size heuristic
+            let weight_decay = 1.0+(50.0-self.square_size)*0.02;
+            if !self.overheated && self.cooldown_timer-cooldown_timer_cost > 0.0 {
+                self.cooldown_timer -= cooldown_timer_cost;
+                self.velocity[1] -= 0.15*weight_decay;
+            } else if !self.overheated {
+                self.overheated = true;
+            }
+        }
+        if self.keys.contains(&Key::Q) {
+            //make player larger and heavier
+            if self.square_size < SQUARE_SIZE_MAX {
+                self.position[1] -= 0.5;
+                self.square_size += 0.5;
+            }
+        }
+        if self.keys.contains(&Key::W) {
+            //make player smaller and lighter
+            if self.square_size > SQUARE_SIZE_MIN {
+                self.square_size -= 0.5;
             }
         }
     }
@@ -114,7 +153,7 @@ impl App {
 fn main() {
     let opengl = OpenGL::V3_2;
 
-    let mut window: Window = WindowSettings::new("graphics-test",RESOLUTION)
+    let mut window: Window = WindowSettings::new("Jetpack Game", RESOLUTION)
         .opengl(opengl)
         .exit_on_esc(true)
         .build()
@@ -125,6 +164,7 @@ fn main() {
 
     let mut events = Events::new(EventSettings::new());
     while let Some(e) = events.next(&mut window) {
+        //use a HashMap to manage button presses
         if let Some(Button::Keyboard(key)) = e.press_args() {
             app.keys.insert(key);
         }
